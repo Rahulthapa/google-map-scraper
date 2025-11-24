@@ -3,13 +3,13 @@ services:
     name: google-review-scraper
     env: node
     plan: free
-    buildCommand: npm install && mkdir -p /opt/render/.cache/puppeteer && npx puppeteer browsers install chrome
+    buildCommand: npm install && npx puppeteer browsers install chrome
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/.cache/puppeteer
+        value: /tmp/.cache/puppeteer
       - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
         value: "false"
 
