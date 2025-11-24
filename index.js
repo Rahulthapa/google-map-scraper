@@ -5,6 +5,9 @@ import { execSync } from "child_process";
 
 const app = express();
 
+// Helper function to replace deprecated waitForTimeout
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // Enable CORS for frontend access
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -191,7 +194,7 @@ async function expandReviews(page) {
         const button = await page.$(selector);
         if (button) {
           await button.click();
-          await page.waitForTimeout(500); // Wait for expansion
+          await delay(500); // Wait for expansion
         }
       } catch (e) {
         // Button might not be clickable, continue
@@ -203,7 +206,7 @@ async function expandReviews(page) {
     for (const button of moreButtons) {
       try {
         await button.click();
-        await page.waitForTimeout(300);
+        await delay(300);
       } catch (e) {
         // Continue if button can't be clicked
       }
@@ -227,7 +230,7 @@ async function scrollToLoadReviews(page, maxScrolls = 10) {
       reviewsSection.scrollTop = reviewsSection.scrollHeight;
     });
 
-    await page.waitForTimeout(2000); // Wait for lazy loading
+    await delay(2000); // Wait for lazy loading
 
     // Check if new reviews loaded
     const currentCount = await page.evaluate(() => {
@@ -339,7 +342,7 @@ app.get("/scrape", async (req, res) => {
         });
         
         // Wait a bit for page to stabilize
-        await page.waitForTimeout(2000);
+        await delay(2000);
 
         // Check if navigation was successful
         if (response && response.status() < 400) {
@@ -397,7 +400,7 @@ app.get("/scrape", async (req, res) => {
     }
 
     // Wait a bit for page to fully load
-    await page.waitForTimeout(3000);
+    await delay(3000);
 
     // Verify page actually loaded (check for Google Maps content)
     const pageTitle = await page.title();
@@ -430,7 +433,7 @@ app.get("/scrape", async (req, res) => {
         const reviewsTabs = await page.$x("//button[contains(text(), 'Reviews')] | //div[contains(text(), 'Reviews')]");
         if (reviewsTabs.length > 0) {
           await reviewsTabs[0].click();
-          await page.waitForTimeout(2000);
+          await delay(2000);
           await page.waitForSelector(".jftiEf, [data-review-id], .MyEned", { 
             timeout: 15000 
           });
@@ -439,7 +442,7 @@ app.get("/scrape", async (req, res) => {
           const reviewsTabByData = await page.$('[data-value="Reviews"]');
           if (reviewsTabByData) {
             await reviewsTabByData.click();
-            await page.waitForTimeout(2000);
+            await delay(2000);
             await page.waitForSelector(".jftiEf, [data-review-id], .MyEned", { 
               timeout: 15000 
             });
