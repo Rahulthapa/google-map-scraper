@@ -1,6 +1,7 @@
 import express from "express";
 import puppeteer from "puppeteer";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
+import { execSync } from "child_process";
 
 const app = express();
 
@@ -25,6 +26,85 @@ function isValidGoogleMapsUrl(url) {
     return false;
   }
 }
+
+// Cache for Chrome path to avoid repeated checks
+let cachedChromePath = null;
+let chromeInstallAttempted = false;
+
+// Ensure cache directory exists
+function ensureCacheDir() {
+  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/.cache/puppeteer";
+  try {
+    if (!existsSync(cacheDir)) {
+      mkdirSync(cacheDir, { recursive: true });
+      console.log("Created cache directory:", cacheDir);
+    }
+  } catch (e) {
+    console.warn("Could not create cache directory:", e.message);
+  }
+}
+
+// Ensure Chrome is installed (for Render deployment)
+// This runs once at startup, not on every request
+async function ensureChromeInstalled() {
+  // Ensure cache directory exists
+  ensureCacheDir();
+  
+  // Return cached path if available
+  if (cachedChromePath && existsSync(cachedChromePath)) {
+    return cachedChromePath;
+  }
+  
+  try {
+    const chromePath = puppeteer.executablePath();
+    if (chromePath && existsSync(chromePath)) {
+      console.log("Chrome found at:", chromePath);
+      cachedChromePath = chromePath;
+      return chromePath;
+    }
+    
+    // Chrome not found, try to install it (only once)
+    if (!chromeInstallAttempted) {
+      chromeInstallAttempted = true;
+      console.log("Chrome not found, attempting to install...");
+      console.log("Cache directory:", process.env.PUPPETEER_CACHE_DIR || "default");
+      try {
+        execSync("npx puppeteer browsers install chrome", { 
+          stdio: "inherit",
+          timeout: 300000, // 5 minutes timeout
+          env: { ...process.env }
+        });
+        console.log("Chrome installation command completed");
+        
+        // Wait a moment for file system to sync
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Try to get path again
+        const newChromePath = puppeteer.executablePath();
+        if (newChromePath && existsSync(newChromePath)) {
+          console.log("Chrome installed at:", newChromePath);
+          cachedChromePath = newChromePath;
+          return newChromePath;
+        } else {
+          console.error("Chrome installation completed but path not found:", newChromePath);
+        }
+      } catch (installError) {
+        console.error("Failed to install Chrome:", installError.message);
+        // Don't throw, let Puppeteer try to handle it
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.error("Error ensuring Chrome installation:", e.message);
+    return null;
+  }
+}
+
+// Initialize Chrome check at startup (non-blocking)
+ensureChromeInstalled().catch(err => {
+  console.error("Startup Chrome check failed:", err.message);
+});
 
 // Improved review extraction with multiple selector fallbacks
 async function extractReviews(page) {
@@ -182,6 +262,9 @@ app.get("/scrape", async (req, res) => {
 
   let browser;
   try {
+    // Ensure Chrome is installed (will install if not found)
+    const chromePath = await ensureChromeInstalled();
+    
     // Configure Puppeteer for Render deployment
     const launchOptions = {
       headless: "new",
@@ -199,19 +282,9 @@ app.get("/scrape", async (req, res) => {
       ]
     };
 
-    // On Render, try to find Chrome executable
-    // Puppeteer should automatically find Chrome if installed via build command
-    try {
-      // Try to get the executable path - this will work if Chrome is installed
-      const chromePath = puppeteer.executablePath();
-      if (chromePath && existsSync(chromePath)) {
-        launchOptions.executablePath = chromePath;
-        console.log("Found Chrome at:", chromePath);
-      } else {
-        console.log("Chrome not found at:", chromePath, "- Puppeteer will attempt to download");
-      }
-    } catch (e) {
-      console.log("Chrome path detection failed:", e.message);
+    // Use the Chrome path if we found/installed it
+    if (chromePath) {
+      launchOptions.executablePath = chromePath;
     }
 
     browser = await puppeteer.launch(launchOptions);
