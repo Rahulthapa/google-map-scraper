@@ -608,9 +608,12 @@ app.get("/scrape", async (req, res) => {
     // Google Maps sometimes shows reviews directly, sometimes requires clicking a tab
     let reviewsFound = false;
     
+    // Wait a bit for page to fully render
+    await delay(3000);
+    
     // First, check if reviews are already visible
     const initialReviews = await page.evaluate(() => {
-      return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']").length;
+      return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane'], .wiI7pd, .d4r55").length;
     });
     
     if (initialReviews > 0) {
@@ -618,6 +621,12 @@ app.get("/scrape", async (req, res) => {
       reviewsFound = true;
     } else {
       console.log("Reviews not immediately visible, looking for Reviews tab...");
+      
+      // Scroll down a bit to make sure the page is fully loaded
+      await page.evaluate(() => {
+        window.scrollBy(0, 500);
+      });
+      await delay(2000);
       
       // Try multiple strategies to find and click the Reviews tab
       const reviewTabSelectors = [
@@ -691,23 +700,29 @@ app.get("/scrape", async (req, res) => {
       // Try clicking any button/div that contains "review" in its text (case insensitive)
       if (!tabClicked) {
         try {
-          const allButtons = await page.$$('button, div[role="button"], div[role="tab"]');
-          for (const btn of allButtons) {
+          // Get all potential clickable elements and check their text
+          const allClickables = await page.$$('button, div[role="button"], div[role="tab"], span[role="button"], a[role="button"]');
+          console.log(`Checking ${allClickables.length} clickable elements for reviews...`);
+          
+          for (const btn of allClickables) {
             try {
-              const text = await btn.evaluate(el => el.innerText?.toLowerCase() || el.textContent?.toLowerCase() || '');
-              const ariaLabel = await btn.evaluate(el => el.getAttribute('aria-label')?.toLowerCase() || '');
+              const elementInfo = await btn.evaluate(el => ({
+                text: (el.innerText || el.textContent || '').toLowerCase(),
+                ariaLabel: (el.getAttribute('aria-label') || '').toLowerCase(),
+                visible: el.offsetParent !== null
+              }));
               
-              if (text.includes('review') || ariaLabel.includes('review')) {
-                console.log(`Found Reviews tab by text search: ${text || ariaLabel}`);
+              if (elementInfo.visible && (elementInfo.text.includes('review') || elementInfo.ariaLabel.includes('review'))) {
+                console.log(`Found Reviews tab by text search: ${elementInfo.text.substring(0, 50) || elementInfo.ariaLabel.substring(0, 50)}`);
                 await btn.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-                await delay(1000);
+                await delay(1500);
                 await btn.click();
-                await delay(3000);
+                await delay(4000); // Wait longer for reviews to load
                 tabClicked = true;
                 break;
               }
             } catch (e) {
-              // Continue
+              // Continue to next element
             }
           }
         } catch (e) {
@@ -717,8 +732,39 @@ app.get("/scrape", async (req, res) => {
       
       if (tabClicked) {
         console.log("Reviews tab clicked, waiting for reviews to load...");
+        // Wait longer and scroll to trigger loading
+        await delay(3000);
+        
+        // Scroll within the reviews section if it exists
+        await page.evaluate(() => {
+          // Try to find the reviews panel/container
+          const reviewPanel = document.querySelector('[role="main"]') || 
+                             document.querySelector('[jsaction*="review"]') ||
+                             document.body;
+          if (reviewPanel) {
+            reviewPanel.scrollTop = reviewPanel.scrollHeight / 2;
+          }
+        });
+        await delay(2000);
       } else {
-        console.log("No Reviews tab found, reviews might be directly visible or page structure is different");
+        console.log("No Reviews tab found, trying to scroll to find reviews...");
+        // Even if no tab was clicked, try scrolling to find reviews
+        for (let i = 0; i < 3; i++) {
+          await page.evaluate(() => {
+            window.scrollBy(0, window.innerHeight);
+          });
+          await delay(2000);
+          
+          const scrollReviews = await page.evaluate(() => {
+            return document.querySelectorAll(".jftiEf, [data-review-id], .wiI7pd, .d4r55").length;
+          });
+          
+          if (scrollReviews > 0) {
+            console.log(`Found ${scrollReviews} reviews after scrolling`);
+            reviewsFound = true;
+            break;
+          }
+        }
       }
     }
     
@@ -733,34 +779,47 @@ app.get("/scrape", async (req, res) => {
       ".d4r55"                // Author name (indicates review exists)
     ];
     
-    let reviewsLoaded = false;
-    for (const selector of reviewSelectors) {
-      try {
-        await page.waitForSelector(selector, { timeout: 10000 });
-        const count = await page.evaluate((sel) => {
-          return document.querySelectorAll(sel).length;
-        }, selector);
-        if (count > 0) {
-          console.log(`Found ${count} reviews using selector: ${selector}`);
-          reviewsLoaded = true;
-          break;
+    let reviewsLoaded = reviewsFound; // Start with what we found earlier
+    
+    if (!reviewsLoaded) {
+      // Try waiting for selectors with longer timeout
+      for (const selector of reviewSelectors) {
+        try {
+          await page.waitForSelector(selector, { timeout: 15000 });
+          const count = await page.evaluate((sel) => {
+            return document.querySelectorAll(sel).length;
+          }, selector);
+          if (count > 0) {
+            console.log(`Found ${count} reviews using selector: ${selector}`);
+            reviewsLoaded = true;
+            break;
+          }
+        } catch (e) {
+          // Try next selector
         }
-      } catch (e) {
-        // Try next selector
       }
     }
     
     if (!reviewsLoaded) {
-      // Last attempt: scroll down to trigger lazy loading
+      // Last attempt: scroll down to trigger lazy loading with more attempts
       console.log("Scrolling page to trigger review loading...");
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 8; i++) {
         await page.evaluate(() => {
+          // Try scrolling both window and any scrollable containers
           window.scrollBy(0, window.innerHeight);
+          
+          // Also try scrolling review-specific containers
+          const containers = document.querySelectorAll('[role="main"], [jsaction*="review"], [data-review-id]');
+          containers.forEach(container => {
+            if (container.scrollHeight > container.clientHeight) {
+              container.scrollTop = container.scrollHeight;
+            }
+          });
         });
-        await delay(2000);
+        await delay(2500);
         
         const reviewCount = await page.evaluate(() => {
-          return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']").length;
+          return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane'], .wiI7pd, .d4r55").length;
         });
         
         if (reviewCount > 0) {
