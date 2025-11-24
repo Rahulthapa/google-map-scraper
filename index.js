@@ -201,12 +201,39 @@ async function expandReviews(page) {
       }
     }
 
-    // Alternative: try clicking all buttons with "More" text using XPath
-    const moreButtons = await page.$x("//button[contains(text(), 'More')]");
-    for (const button of moreButtons) {
+    // Alternative: try clicking all buttons with "More" text
+    // Get all buttons and check their text (this catches buttons the first method might have missed)
+    const allButtons = await page.$$('button');
+    const clickedSelectors = new Set(expandButtons);
+    
+    for (const button of allButtons) {
       try {
-        await button.click();
-        await delay(300);
+        const buttonInfo = await button.evaluate(el => ({
+          text: (el.innerText || el.textContent || '').toLowerCase(),
+          ariaLabel: (el.getAttribute('aria-label') || '').toLowerCase(),
+          id: el.id,
+          className: el.className
+        }));
+        
+        // Check if this button matches "more" criteria
+        const isMoreButton = buttonInfo.text.includes('more') || 
+                            buttonInfo.ariaLabel.includes('more') || 
+                            buttonInfo.text.includes('show more') || 
+                            buttonInfo.text.includes('read more');
+        
+        if (isMoreButton) {
+          // Create a unique identifier for this button
+          const buttonId = buttonInfo.id ? `#${buttonInfo.id}` : 
+                          buttonInfo.className ? `.${buttonInfo.className.split(' ')[0]}` : null;
+          
+          // Skip if we already clicked a button with this selector
+          if (!buttonId || !clickedSelectors.has(buttonId)) {
+            await button.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+            await delay(300);
+            await button.click();
+            await delay(300);
+          }
+        }
       } catch (e) {
         // Continue if button can't be clicked
       }
@@ -463,19 +490,22 @@ app.get("/scrape", async (req, res) => {
       
       let tabClicked = false;
       
-      // Try XPath selectors first
+      // Try XPath selectors first (if $x is available)
       for (const xpathSelector of reviewTabSelectors.filter(s => s.startsWith('//'))) {
         try {
-          const tabs = await page.$x(xpathSelector);
-          if (tabs.length > 0) {
-            console.log(`Found Reviews tab with XPath: ${xpathSelector}`);
-            // Scroll to element if needed
-            await tabs[0].evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-            await delay(1000);
-            await tabs[0].click();
-            await delay(3000); // Wait for reviews to load
-            tabClicked = true;
-            break;
+          // Check if $x method exists
+          if (typeof page.$x === 'function') {
+            const tabs = await page.$x(xpathSelector);
+            if (tabs.length > 0) {
+              console.log(`Found Reviews tab with XPath: ${xpathSelector}`);
+              // Scroll to element if needed
+              await tabs[0].evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+              await delay(1000);
+              await tabs[0].click();
+              await delay(3000); // Wait for reviews to load
+              tabClicked = true;
+              break;
+            }
           }
         } catch (e) {
           // Continue to next selector
