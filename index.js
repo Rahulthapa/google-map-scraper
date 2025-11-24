@@ -421,36 +421,194 @@ app.get("/scrape", async (req, res) => {
       console.warn("Could not override permissions:", permError.message);
     }
 
-    // Wait for reviews to load (try multiple selectors)
-    try {
-      await page.waitForSelector(".jftiEf, [data-review-id], .MyEned", { 
-        timeout: 15000 
-      });
-    } catch (e) {
-      // If reviews don't load, might need to click "Reviews" tab
-      try {
-        // Try to find Reviews tab using XPath
-        const reviewsTabs = await page.$x("//button[contains(text(), 'Reviews')] | //div[contains(text(), 'Reviews')]");
-        if (reviewsTabs.length > 0) {
-          await reviewsTabs[0].click();
-          await delay(2000);
-          await page.waitForSelector(".jftiEf, [data-review-id], .MyEned", { 
-            timeout: 15000 
-          });
-        } else {
-          // Try data attribute selector
-          const reviewsTabByData = await page.$('[data-value="Reviews"]');
-          if (reviewsTabByData) {
-            await reviewsTabByData.click();
-            await delay(2000);
-            await page.waitForSelector(".jftiEf, [data-review-id], .MyEned", { 
-              timeout: 15000 
-            });
+    // Try to find and click Reviews tab first (if needed)
+    // Google Maps sometimes shows reviews directly, sometimes requires clicking a tab
+    let reviewsFound = false;
+    
+    // First, check if reviews are already visible
+    const initialReviews = await page.evaluate(() => {
+      return document.querySelectorAll(".jftiEf, [data-review-id], .MyEned, [jsaction*='review'], .MyEned").length;
+    });
+    
+    if (initialReviews > 0) {
+      console.log(`Found ${initialReviews} reviews without clicking tab`);
+      reviewsFound = true;
+    } else {
+      console.log("Reviews not immediately visible, looking for Reviews tab...");
+      
+      // Try multiple strategies to find and click the Reviews tab
+      const reviewTabSelectors = [
+        // Button with text "Reviews"
+        "//button[contains(translate(text(), 'REVIEWS', 'reviews'), 'reviews')]",
+        "//button[contains(text(), 'Reviews')]",
+        "//button[contains(text(), 'REVIEWS')]",
+        // Div with text "Reviews"
+        "//div[contains(translate(text(), 'REVIEWS', 'reviews'), 'reviews')]",
+        "//div[contains(text(), 'Reviews')]",
+        // Data attributes
+        '[data-value="Reviews"]',
+        '[data-value="reviews"]',
+        '[aria-label*="Review"]',
+        '[aria-label*="review"]',
+        // Tab buttons
+        'button[role="tab"]:has-text("Reviews")',
+        'div[role="tab"]:has-text("Reviews")',
+        // Class-based selectors
+        '.RWPxGd[aria-label*="Review"]',
+        'button.RWPxGd',
+        // More generic selectors
+        '[jsaction*="review"]',
+        'button:has([aria-label*="Review"])'
+      ];
+      
+      let tabClicked = false;
+      
+      // Try XPath selectors first
+      for (const xpathSelector of reviewTabSelectors.filter(s => s.startsWith('//'))) {
+        try {
+          const tabs = await page.$x(xpathSelector);
+          if (tabs.length > 0) {
+            console.log(`Found Reviews tab with XPath: ${xpathSelector}`);
+            // Scroll to element if needed
+            await tabs[0].evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+            await delay(1000);
+            await tabs[0].click();
+            await delay(3000); // Wait for reviews to load
+            tabClicked = true;
+            break;
+          }
+        } catch (e) {
+          // Continue to next selector
+        }
+      }
+      
+      // Try CSS selectors
+      if (!tabClicked) {
+        for (const cssSelector of reviewTabSelectors.filter(s => !s.startsWith('//'))) {
+          try {
+            const tab = await page.$(cssSelector);
+            if (tab) {
+              console.log(`Found Reviews tab with CSS: ${cssSelector}`);
+              await tab.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+              await delay(1000);
+              await tab.click();
+              await delay(3000);
+              tabClicked = true;
+              break;
+            }
+          } catch (e) {
+            // Continue to next selector
           }
         }
-      } catch (tabError) {
-        throw new Error("Could not find reviews section. The page might require login or the URL is incorrect.");
       }
+      
+      // Try clicking any button/div that contains "review" in its text (case insensitive)
+      if (!tabClicked) {
+        try {
+          const allButtons = await page.$$('button, div[role="button"], div[role="tab"]');
+          for (const btn of allButtons) {
+            try {
+              const text = await btn.evaluate(el => el.innerText?.toLowerCase() || el.textContent?.toLowerCase() || '');
+              const ariaLabel = await btn.evaluate(el => el.getAttribute('aria-label')?.toLowerCase() || '');
+              
+              if (text.includes('review') || ariaLabel.includes('review')) {
+                console.log(`Found Reviews tab by text search: ${text || ariaLabel}`);
+                await btn.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+                await delay(1000);
+                await btn.click();
+                await delay(3000);
+                tabClicked = true;
+                break;
+              }
+            } catch (e) {
+              // Continue
+            }
+          }
+        } catch (e) {
+          console.warn("Error searching for review tabs:", e.message);
+        }
+      }
+      
+      if (tabClicked) {
+        console.log("Reviews tab clicked, waiting for reviews to load...");
+      } else {
+        console.log("No Reviews tab found, reviews might be directly visible or page structure is different");
+      }
+    }
+    
+    // Now wait for reviews to appear with multiple selector attempts
+    const reviewSelectors = [
+      ".jftiEf",
+      "[data-review-id]",
+      ".MyEned",
+      "[jsaction*='review']",
+      ".fontBodyMedium",
+      "[aria-label*='star']",
+      ".d4r55", // Author name selector
+      ".wiI7pd" // Review text selector
+    ];
+    
+    let reviewsLoaded = false;
+    for (const selector of reviewSelectors) {
+      try {
+        await page.waitForSelector(selector, { timeout: 10000 });
+        const count = await page.evaluate((sel) => {
+          return document.querySelectorAll(sel).length;
+        }, selector);
+        if (count > 0) {
+          console.log(`Found ${count} reviews using selector: ${selector}`);
+          reviewsLoaded = true;
+          break;
+        }
+      } catch (e) {
+        // Try next selector
+      }
+    }
+    
+    if (!reviewsLoaded) {
+      // Last attempt: scroll down to trigger lazy loading
+      console.log("Scrolling page to trigger review loading...");
+      for (let i = 0; i < 5; i++) {
+        await page.evaluate(() => {
+          window.scrollBy(0, window.innerHeight);
+        });
+        await delay(2000);
+        
+        const reviewCount = await page.evaluate(() => {
+          return document.querySelectorAll(".jftiEf, [data-review-id], .MyEned, [jsaction*='review']").length;
+        });
+        
+        if (reviewCount > 0) {
+          console.log(`Found ${reviewCount} reviews after scrolling`);
+          reviewsLoaded = true;
+          break;
+        }
+      }
+    }
+    
+    if (!reviewsLoaded) {
+      // Debug: log what's actually on the page
+      const pageInfo = await page.evaluate(() => {
+        return {
+          title: document.title,
+          url: window.location.href,
+          buttons: Array.from(document.querySelectorAll('button')).slice(0, 10).map(b => ({
+            text: b.innerText?.substring(0, 50),
+            ariaLabel: b.getAttribute('aria-label')?.substring(0, 50),
+            classes: b.className
+          })),
+          hasReviewsSection: !!document.querySelector('[aria-label*="review" i], [aria-label*="Review"]'),
+          bodyText: document.body.innerText?.substring(0, 200)
+        };
+      });
+      
+      console.error("Page debug info:", JSON.stringify(pageInfo, null, 2));
+      
+      throw new Error(
+        "Could not find reviews section. " +
+        "The page might require login, the URL might be incorrect, or Google has changed their page structure. " +
+        "Check the logs for page debug information."
+      );
     }
 
     // Expand truncated reviews
