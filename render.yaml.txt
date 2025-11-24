@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: google-review-scraper
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
