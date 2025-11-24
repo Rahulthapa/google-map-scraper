@@ -291,19 +291,132 @@ app.get("/scrape", async (req, res) => {
 
     const page = await browser.newPage();
     
-    // Set realistic user agent to avoid bot detection
+    // Enhanced anti-detection measures
+    // Set realistic user agent (updated to recent Chrome version)
     await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
     
     // Set viewport
     await page.setViewport({ width: 1920, height: 1080 });
 
-    // Navigate to URL
-    await page.goto(url, { 
-      waitUntil: "networkidle2", 
-      timeout: 60000 
+    // Set additional headers to appear more like a real browser
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Cache-Control': 'max-age=0'
     });
+
+    // Remove webdriver property to avoid detection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+    });
+
+    // Override permissions to avoid permission prompts (do this after navigation)
+    // We'll set this after successful navigation
+
+    // Handle request failures and retries
+    let navigationSuccess = false;
+    let lastError = null;
+    const maxRetries = 3;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Navigation attempt ${attempt}/${maxRetries} to: ${url}`);
+        
+        // Navigate to URL with better error handling
+        const response = await page.goto(url, { 
+          waitUntil: "domcontentloaded", // Changed from networkidle2 to be more lenient
+          timeout: 90000 // Increased timeout
+        });
+        
+        // Wait a bit for page to stabilize
+        await page.waitForTimeout(2000);
+
+        // Check if navigation was successful
+        if (response && response.status() < 400) {
+          navigationSuccess = true;
+          console.log(`Navigation successful with status: ${response.status()}`);
+          break;
+        } else if (response) {
+          console.warn(`Navigation returned status: ${response.status()}`);
+          // Continue anyway, sometimes Google returns non-200 but page still loads
+          navigationSuccess = true;
+          break;
+        }
+      } catch (navError) {
+        lastError = navError;
+        console.error(`Navigation attempt ${attempt} failed:`, navError.message);
+        
+        // If it's a network error, wait before retrying
+        if (attempt < maxRetries && (navError.message.includes('ERR_ABORTED') || navError.message.includes('net::'))) {
+          const waitTime = attempt * 2000; // Exponential backoff: 2s, 4s, 6s
+          console.log(`Waiting ${waitTime}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          
+          // Try to close and recreate the page
+          try {
+            await page.close();
+            page = await browser.newPage();
+            await page.setUserAgent(
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            );
+            await page.setViewport({ width: 1920, height: 1080 });
+            await page.setExtraHTTPHeaders({
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            });
+            await page.evaluateOnNewDocument(() => {
+              Object.defineProperty(navigator, 'webdriver', {
+                get: () => false,
+              });
+            });
+          } catch (pageError) {
+            console.error("Error recreating page:", pageError.message);
+          }
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (!navigationSuccess) {
+      throw new Error(
+        `Failed to navigate to URL after ${maxRetries} attempts. ` +
+        `Last error: ${lastError?.message || 'Unknown error'}. ` +
+        `This might be due to Google blocking automated requests or network issues.`
+      );
+    }
+
+    // Wait a bit for page to fully load
+    await page.waitForTimeout(3000);
+
+    // Verify page actually loaded (check for Google Maps content)
+    const pageTitle = await page.title();
+    const pageUrl = page.url();
+    console.log(`Page loaded - Title: ${pageTitle}, URL: ${pageUrl}`);
+    
+    // Check if we got redirected or blocked
+    if (!pageUrl.includes('google.com/maps')) {
+      throw new Error(`Page redirected to unexpected URL: ${pageUrl}. Google may have blocked the request.`);
+    }
+
+    // Override permissions to avoid permission prompts
+    try {
+      const context = browser.defaultBrowserContext();
+      const urlObj = new URL(url);
+      await context.overridePermissions(`https://${urlObj.hostname}/*`, ['geolocation']);
+    } catch (permError) {
+      console.warn("Could not override permissions:", permError.message);
+    }
 
     // Wait for reviews to load (try multiple selectors)
     try {
