@@ -116,35 +116,119 @@ async function extractReviews(page) {
     const reviewSelectors = [
       ".jftiEf",           // Primary selector
       "[data-review-id]",  // Alternative
-      ".MyEned"            // Another variant
+      ".MyEned",           // Another variant
+      ".fontBodyMedium",   // Newer selector (found in logs)
+      "[jsaction*='review']", // JS action based
+      ".d4r55"             // Author name can also indicate review container
     ];
 
     let reviewElements = [];
+    let usedSelector = null;
+    
     for (const selector of reviewSelectors) {
       reviewElements = document.querySelectorAll(selector);
-      if (reviewElements.length > 0) break;
+      if (reviewElements.length > 0) {
+        usedSelector = selector;
+        console.log(`Using selector: ${selector}, found ${reviewElements.length} elements`);
+        break;
+      }
     }
 
     if (reviewElements.length === 0) {
+      console.log("No review elements found with any selector");
       return [];
     }
 
-    return [...reviewElements].map(el => {
-      // Try multiple selectors for each field
-      const authorSelectors = [".d4r55", ".X43Kjb", "[data-review-id]"];
-      const ratingSelectors = [".kvMYJc", ".Fam1ne", "[aria-label*='star']"];
-      const textSelectors = [".wiI7pd", ".MyEned", ".review-full-text"];
-      const dateSelectors = [".rsqaWe", ".p4vbYd", ".fnsRMc"];
-
-      const findText = (selectors) => {
-        for (const sel of selectors) {
-          const elem = el.querySelector(sel);
-          if (elem) return elem.innerText?.trim() || "";
+    // If we're using .fontBodyMedium, we need to find parent review containers
+    // .fontBodyMedium might be the text itself, so we need to find the review container
+    let actualReviewElements = [];
+    
+    if (usedSelector === ".fontBodyMedium") {
+      // .fontBodyMedium is likely the review text, find parent containers
+      const fontElements = Array.from(reviewElements);
+      const reviewContainers = new Set();
+      
+      fontElements.forEach(el => {
+        // Walk up the DOM to find the review container
+        let parent = el.parentElement;
+        let depth = 0;
+        while (parent && depth < 10) {
+          // Look for common review container patterns
+          if (parent.getAttribute('data-review-id') || 
+              parent.classList.contains('jftiEf') ||
+              parent.getAttribute('jsaction')?.includes('review') ||
+              parent.querySelector('[aria-label*="star"]')) {
+            reviewContainers.add(parent);
+            break;
+          }
+          parent = parent.parentElement;
+          depth++;
         }
+        // If no container found, use the element itself or its immediate parent
+        if (!parent || depth >= 10) {
+          reviewContainers.add(el.parentElement || el);
+        }
+      });
+      
+      actualReviewElements = Array.from(reviewContainers);
+    } else {
+      actualReviewElements = Array.from(reviewElements);
+    }
+
+    console.log(`Extracting from ${actualReviewElements.length} review containers`);
+
+    return actualReviewElements.map((el, index) => {
+      // Try multiple selectors for each field
+      const authorSelectors = [
+        ".d4r55", 
+        ".X43Kjb", 
+        "[data-review-id]",
+        "span[aria-label]",
+        ".fontBodyMedium", // Sometimes author name uses this
+        "div[aria-label*='review']"
+      ];
+      
+      const ratingSelectors = [
+        ".kvMYJc", 
+        ".Fam1ne", 
+        "[aria-label*='star']",
+        "[aria-label*='Star']",
+        "span[aria-label*='rating']",
+        "div[aria-label*='rating']"
+      ];
+      
+      const textSelectors = [
+        ".wiI7pd", 
+        ".MyEned", 
+        ".review-full-text",
+        ".fontBodyMedium",
+        "[data-review-text]",
+        "span.fontBodyMedium"
+      ];
+      
+      const dateSelectors = [
+        ".rsqaWe", 
+        ".p4vbYd", 
+        ".fnsRMc",
+        "span[aria-label*='ago']",
+        "span[aria-label*='month']",
+        "span[aria-label*='week']"
+      ];
+
+      const findText = (selectors, context = el) => {
+        for (const sel of selectors) {
+          const elem = context.querySelector(sel);
+          if (elem) {
+            const text = elem.innerText?.trim() || elem.textContent?.trim() || "";
+            if (text) return text;
+          }
+        }
+        // Fallback: search in all text nodes
         return "";
       };
 
       const findRating = () => {
+        // First try structured selectors
         for (const sel of ratingSelectors) {
           const elem = el.querySelector(sel);
           if (elem) {
@@ -153,18 +237,55 @@ async function extractReviews(page) {
             if (match) return Number(match[1]);
           }
         }
-        // Fallback: look for star emoji or rating text
-        const ratingText = el.innerText.match(/(\d+)\s*star/i);
-        return ratingText ? Number(ratingText[1]) : null;
+        
+        // Fallback: look for star emoji or rating text in the entire element
+        const allText = el.innerText || el.textContent || "";
+        const ratingMatch = allText.match(/(\d+)\s*star/i) || allText.match(/rated\s*(\d+)/i);
+        if (ratingMatch) return Number(ratingMatch[1]);
+        
+        // Look for aria-label with rating anywhere in the element tree
+        const allElements = el.querySelectorAll('[aria-label]');
+        for (const elem of allElements) {
+          const ariaLabel = elem.getAttribute("aria-label") || "";
+          if (ariaLabel.includes("star") || ariaLabel.includes("Star")) {
+            const match = ariaLabel.match(/(\d+)/);
+            if (match) return Number(match[1]);
+          }
+        }
+        
+        return null;
       };
 
+      // Extract fields
+      const author = findText(authorSelectors);
+      const rating = findRating();
+      const text = findText(textSelectors);
+      const date = findText(dateSelectors);
+
+      // If we found text but no author, try to find author in parent or sibling
+      let finalAuthor = author;
+      if (!finalAuthor && text) {
+        // Look for author in the element's context
+        const parent = el.parentElement;
+        if (parent) {
+          finalAuthor = findText(authorSelectors, parent);
+        }
+      }
+
       return {
-        author: findText(authorSelectors),
-        rating: findRating(),
-        text: findText(textSelectors),
-        date: findText(dateSelectors)
+        author: finalAuthor,
+        rating: rating,
+        text: text,
+        date: date
       };
-    }).filter(review => review.text || review.author); // Filter out empty reviews
+    }).filter(review => {
+      // Keep reviews that have at least text or author
+      const hasContent = review.text || review.author;
+      if (!hasContent) {
+        console.log(`Filtered out empty review:`, review);
+      }
+      return hasContent;
+    });
   });
 }
 
@@ -648,13 +769,18 @@ app.get("/scrape", async (req, res) => {
     await scrollToLoadReviews(page, 10);
 
     // Extract reviews
+    console.log("Starting review extraction...");
     const reviews = await extractReviews(page);
+    console.log(`Extracted ${reviews.length} reviews`);
 
     await browser.close();
 
     if (reviews.length === 0) {
+      // Try one more time with a different approach - get all text that might be reviews
+      console.log("No reviews extracted, this might indicate a selector mismatch");
       return res.status(404).json({ 
-        error: "No reviews found. The selectors might have changed or the page structure is different." 
+        error: "No reviews found. The selectors might have changed or the page structure is different. " +
+               "Reviews were detected on the page but could not be extracted. Check logs for details." 
       });
     }
 
