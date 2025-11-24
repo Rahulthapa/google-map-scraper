@@ -1,5 +1,6 @@
 import express from "express";
 import puppeteer from "puppeteer";
+import { existsSync } from "fs";
 
 const app = express();
 
@@ -181,16 +182,39 @@ app.get("/scrape", async (req, res) => {
 
   let browser;
   try {
-    browser = await puppeteer.launch({
+    // Configure Puppeteer for Render deployment
+    const launchOptions = {
       headless: "new",
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--disable-blink-features=AutomationControlled"
+        "--disable-blink-features=AutomationControlled",
+        "--disable-software-rasterizer",
+        "--disable-extensions",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding"
       ]
-    });
+    };
+
+    // On Render, try to find Chrome executable
+    // Puppeteer should automatically find Chrome if installed via build command
+    try {
+      // Try to get the executable path - this will work if Chrome is installed
+      const chromePath = puppeteer.executablePath();
+      if (chromePath && existsSync(chromePath)) {
+        launchOptions.executablePath = chromePath;
+        console.log("Found Chrome at:", chromePath);
+      } else {
+        console.log("Chrome not found at:", chromePath, "- Puppeteer will attempt to download");
+      }
+    } catch (e) {
+      console.log("Chrome path detection failed:", e.message);
+    }
+
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     
@@ -281,4 +305,5 @@ app.get("/", (req, res) => {
   res.send("Google Review Scraper Running");
 });
 
-app.listen(3000, () => console.log("Server started on port 3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
