@@ -113,13 +113,11 @@ ensureChromeInstalled().catch(err => {
 async function extractReviews(page) {
   return await page.evaluate(() => {
     // Try multiple selector patterns (Google changes these frequently)
+    // Focus on actual review containers, not business listings
     const reviewSelectors = [
-      ".jftiEf",           // Primary selector
+      ".jftiEf",           // Primary selector for review containers
       "[data-review-id]",  // Alternative
-      ".MyEned",           // Another variant
-      ".fontBodyMedium",   // Newer selector (found in logs)
-      "[jsaction*='review']", // JS action based
-      ".d4r55"             // Author name can also indicate review container
+      "[jsaction*='review'][jsaction*='pane']", // Review pane containers
     ];
 
     let reviewElements = [];
@@ -134,85 +132,99 @@ async function extractReviews(page) {
       }
     }
 
+    // If primary selectors don't work, try finding reviews by structure
+    if (reviewElements.length === 0) {
+      // Look for elements that contain both a rating (star) and review text
+      const allElements = document.querySelectorAll('[aria-label*="star"], [aria-label*="Star"]');
+      const potentialReviews = [];
+      
+      allElements.forEach(el => {
+        // Walk up to find the review container
+        let container = el;
+        for (let i = 0; i < 5; i++) {
+          container = container.parentElement;
+          if (!container) break;
+          
+          // Check if this looks like a review container
+          const hasReviewText = container.querySelector('.wiI7pd, .MyEned, [class*="review"]');
+          const hasAuthor = container.querySelector('.d4r55, .X43Kjb, [class*="author"]');
+          
+          if (hasReviewText || hasAuthor) {
+            potentialReviews.push(container);
+            break;
+          }
+        }
+      });
+      
+      // Remove duplicates
+      reviewElements = Array.from(new Set(potentialReviews));
+      if (reviewElements.length > 0) {
+        usedSelector = "structure-based";
+        console.log(`Using structure-based detection, found ${reviewElements.length} potential reviews`);
+      }
+    }
+
     if (reviewElements.length === 0) {
       console.log("No review elements found with any selector");
       return [];
     }
 
-    // If we're using .fontBodyMedium, we need to find parent review containers
-    // .fontBodyMedium might be the text itself, so we need to find the review container
-    let actualReviewElements = [];
-    
-    if (usedSelector === ".fontBodyMedium") {
-      // .fontBodyMedium is likely the review text, find parent containers
-      const fontElements = Array.from(reviewElements);
-      const reviewContainers = new Set();
-      
-      fontElements.forEach(el => {
-        // Walk up the DOM to find the review container
-        let parent = el.parentElement;
-        let depth = 0;
-        while (parent && depth < 10) {
-          // Look for common review container patterns
-          if (parent.getAttribute('data-review-id') || 
-              parent.classList.contains('jftiEf') ||
-              parent.getAttribute('jsaction')?.includes('review') ||
-              parent.querySelector('[aria-label*="star"]')) {
-            reviewContainers.add(parent);
-            break;
-          }
-          parent = parent.parentElement;
-          depth++;
-        }
-        // If no container found, use the element itself or its immediate parent
-        if (!parent || depth >= 10) {
-          reviewContainers.add(el.parentElement || el);
-        }
-      });
-      
-      actualReviewElements = Array.from(reviewContainers);
-    } else {
-      actualReviewElements = Array.from(reviewElements);
-    }
-
+    const actualReviewElements = Array.from(reviewElements);
     console.log(`Extracting from ${actualReviewElements.length} review containers`);
 
+    // Helper function to check if text looks like business info (not a review)
+    const isBusinessInfo = (text) => {
+      if (!text) return true;
+      const lower = text.toLowerCase();
+      // Patterns that indicate business information, not reviews
+      return /^\d+\.\d+\(\d+\)$/.test(text.trim()) || // "4.1(470)"
+             lower.includes('coffee shop') ||
+             lower.includes('coffee chain') ||
+             lower.includes('closes') ||
+             lower.includes('open') ||
+             lower.includes('phone') ||
+             /^\$\d+/.test(text.trim()) || // Price range "$1–10"
+             /\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/.test(text) || // Phone numbers
+             /\d+\s+\w+\s+(rd|st|ave|blvd|street|road)/i.test(text); // Addresses
+    };
+
+    // Helper function to check if author looks like a real name (not business rating)
+    const isRealAuthor = (author) => {
+      if (!author) return false;
+      // Business ratings look like "4.1(470)" - not a name
+      if (/^\d+\.\d+\(\d+\)$/.test(author.trim())) return false;
+      // Real names usually have letters and might have spaces
+      return /[a-zA-Z]/.test(author) && author.length > 2;
+    };
+
     return actualReviewElements.map((el, index) => {
-      // Try multiple selectors for each field
+      // Try multiple selectors for each field - be more specific
       const authorSelectors = [
-        ".d4r55", 
-        ".X43Kjb", 
-        "[data-review-id]",
-        "span[aria-label]",
-        ".fontBodyMedium", // Sometimes author name uses this
-        "div[aria-label*='review']"
+        ".d4r55",           // Primary author selector
+        ".X43Kjb",         // Alternative
+        "span.d4r55",      // More specific
+        "div.d4r55"       // Container variant
       ];
       
       const ratingSelectors = [
-        ".kvMYJc", 
-        ".Fam1ne", 
+        ".kvMYJc",         // Primary rating selector
+        ".Fam1ne",         // Alternative
         "[aria-label*='star']",
-        "[aria-label*='Star']",
-        "span[aria-label*='rating']",
-        "div[aria-label*='rating']"
+        "[aria-label*='Star']"
       ];
       
       const textSelectors = [
-        ".wiI7pd", 
-        ".MyEned", 
-        ".review-full-text",
-        ".fontBodyMedium",
-        "[data-review-text]",
-        "span.fontBodyMedium"
+        ".wiI7pd",         // Primary review text selector
+        ".MyEned",          // Alternative
+        "span.wiI7pd",      // More specific
+        "div.wiI7pd"        // Container variant
       ];
       
       const dateSelectors = [
-        ".rsqaWe", 
-        ".p4vbYd", 
-        ".fnsRMc",
-        "span[aria-label*='ago']",
-        "span[aria-label*='month']",
-        "span[aria-label*='week']"
+        ".rsqaWe",          // Primary date selector
+        ".p4vbYd",          // Alternative
+        ".fnsRMc",          // Another variant
+        "span.rsqaWe"       // More specific
       ];
 
       const findText = (selectors, context = el) => {
@@ -220,71 +232,94 @@ async function extractReviews(page) {
           const elem = context.querySelector(sel);
           if (elem) {
             const text = elem.innerText?.trim() || elem.textContent?.trim() || "";
-            if (text) return text;
+            if (text && !isBusinessInfo(text)) return text;
           }
         }
-        // Fallback: search in all text nodes
         return "";
       };
 
       const findRating = () => {
-        // First try structured selectors
+        // First try structured selectors for user review ratings
         for (const sel of ratingSelectors) {
           const elem = el.querySelector(sel);
           if (elem) {
             const ariaLabel = elem.getAttribute("aria-label") || "";
-            const match = ariaLabel.match(/(\d+)/);
-            if (match) return Number(match[1]);
+            // Look for patterns like "Rated 5 out of 5 stars" or "5 stars"
+            const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
+            if (match) {
+              const rating = Number(match[1]);
+              if (rating >= 1 && rating <= 5) return rating;
+            }
           }
         }
-        
-        // Fallback: look for star emoji or rating text in the entire element
-        const allText = el.innerText || el.textContent || "";
-        const ratingMatch = allText.match(/(\d+)\s*star/i) || allText.match(/rated\s*(\d+)/i);
-        if (ratingMatch) return Number(ratingMatch[1]);
         
         // Look for aria-label with rating anywhere in the element tree
         const allElements = el.querySelectorAll('[aria-label]');
         for (const elem of allElements) {
           const ariaLabel = elem.getAttribute("aria-label") || "";
           if (ariaLabel.includes("star") || ariaLabel.includes("Star")) {
-            const match = ariaLabel.match(/(\d+)/);
-            if (match) return Number(match[1]);
+            const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
+            if (match) {
+              const rating = Number(match[1]);
+              if (rating >= 1 && rating <= 5) return rating;
+            }
           }
         }
         
         return null;
       };
 
-      // Extract fields
+      // Extract fields with validation
       const author = findText(authorSelectors);
       const rating = findRating();
       const text = findText(textSelectors);
       const date = findText(dateSelectors);
 
-      // If we found text but no author, try to find author in parent or sibling
-      let finalAuthor = author;
-      if (!finalAuthor && text) {
-        // Look for author in the element's context
-        const parent = el.parentElement;
-        if (parent) {
-          finalAuthor = findText(authorSelectors, parent);
-        }
+      // Validate this is actually a review, not business info
+      if (!isRealAuthor(author) && !text) {
+        // Skip if it doesn't look like a real review
+        return null;
+      }
+
+      // Filter out business information from text
+      let cleanText = text;
+      if (cleanText && isBusinessInfo(cleanText)) {
+        cleanText = "";
+      }
+
+      // If text contains business info patterns, try to extract just the review part
+      if (cleanText && (cleanText.includes('Coffee shop') || cleanText.includes('Closes'))) {
+        // Try to find the actual review text within
+        const lines = cleanText.split('\n');
+        cleanText = lines.find(line => 
+          line.length > 20 && 
+          !isBusinessInfo(line) &&
+          !line.match(/^\d+\.\d+\(\d+\)/) &&
+          !line.includes('Coffee') &&
+          !line.includes('Closes')
+        ) || "";
       }
 
       return {
-        author: finalAuthor,
+        author: isRealAuthor(author) ? author : "",
         rating: rating,
-        text: text,
+        text: cleanText,
         date: date
       };
     }).filter(review => {
-      // Keep reviews that have at least text or author
-      const hasContent = review.text || review.author;
-      if (!hasContent) {
-        console.log(`Filtered out empty review:`, review);
+      // Only keep reviews that have:
+      // 1. A real author name OR review text (not business info)
+      // 2. Review text should be meaningful (more than just a rating)
+      const hasRealAuthor = review.author && isRealAuthor(review.author);
+      const hasReviewText = review.text && review.text.length > 10 && !isBusinessInfo(review.text);
+      const hasRating = review.rating !== null;
+      
+      const isValid = (hasRealAuthor || hasReviewText) && (hasRating || hasReviewText);
+      
+      if (!isValid) {
+        console.log(`Filtered out invalid review:`, review);
       }
-      return hasContent;
+      return isValid;
     });
   });
 }
@@ -380,9 +415,9 @@ async function scrollToLoadReviews(page, maxScrolls = 10) {
 
     await delay(2000); // Wait for lazy loading
 
-    // Check if new reviews loaded
+    // Check if new reviews loaded (use specific review container selectors)
     const currentCount = await page.evaluate(() => {
-      return document.querySelectorAll(".jftiEf, [data-review-id], .MyEned").length;
+      return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']").length;
     });
 
     if (currentCount === previousCount) {
@@ -575,7 +610,7 @@ app.get("/scrape", async (req, res) => {
     
     // First, check if reviews are already visible
     const initialReviews = await page.evaluate(() => {
-      return document.querySelectorAll(".jftiEf, [data-review-id], .MyEned, [jsaction*='review'], .MyEned").length;
+      return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']").length;
     });
     
     if (initialReviews > 0) {
@@ -688,15 +723,14 @@ app.get("/scrape", async (req, res) => {
     }
     
     // Now wait for reviews to appear with multiple selector attempts
+    // Use specific review container selectors, not broad ones like .fontBodyMedium
     const reviewSelectors = [
-      ".jftiEf",
-      "[data-review-id]",
-      ".MyEned",
-      "[jsaction*='review']",
-      ".fontBodyMedium",
-      "[aria-label*='star']",
-      ".d4r55", // Author name selector
-      ".wiI7pd" // Review text selector
+      ".jftiEf",              // Primary review container
+      "[data-review-id]",     // Data attribute based
+      "[jsaction*='review'][jsaction*='pane']", // Review pane
+      ".MyEned",              // Alternative container
+      ".wiI7pd",              // Review text (indicates review exists)
+      ".d4r55"                // Author name (indicates review exists)
     ];
     
     let reviewsLoaded = false;
@@ -726,7 +760,7 @@ app.get("/scrape", async (req, res) => {
         await delay(2000);
         
         const reviewCount = await page.evaluate(() => {
-          return document.querySelectorAll(".jftiEf, [data-review-id], .MyEned, [jsaction*='review']").length;
+          return document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']").length;
         });
         
         if (reviewCount > 0) {
