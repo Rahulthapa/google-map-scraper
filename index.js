@@ -419,8 +419,7 @@ async function extractReviews(page) {
         text: cleanText,
         date: date
       };
-    }).filter(review => {
-      // Only keep reviews that have:
+    }).filter(review => review !== null).filter(review => {
       // 1. A real author name OR review text (not business info)
       // 2. Review text should be meaningful (more than just a rating)
       const hasRealAuthor = review.author && isRealAuthor(review.author);
