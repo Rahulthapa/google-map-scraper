@@ -197,42 +197,72 @@ async function extractReviews(page) {
       return /[a-zA-Z]/.test(author) && author.length > 2;
     };
 
-    return actualReviewElements.map((el, index) => {
+    // Debug: Log first container structure
+    if (actualReviewElements.length > 0) {
+      const firstEl = actualReviewElements[0];
+      const debugInfo = {
+        className: firstEl.className,
+        innerHTML: firstEl.innerHTML.substring(0, 500),
+        children: Array.from(firstEl.children).map(c => ({
+          tag: c.tagName,
+          className: c.className,
+          text: (c.innerText || c.textContent || '').substring(0, 100)
+        }))
+      };
+      console.log("First review container debug:", JSON.stringify(debugInfo, null, 2));
+    }
+
+    const extractedReviews = actualReviewElements.map((el, index) => {
       // Try multiple selectors for each field - be more specific
       const authorSelectors = [
         ".d4r55",           // Primary author selector
         ".X43Kjb",         // Alternative
         "span.d4r55",      // More specific
-        "div.d4r55"       // Container variant
+        "div.d4r55",       // Container variant
+        "[class*='d4r55']", // Partial class match
+        "span[class*='fontBodyMedium']", // Alternative author style
+        "div[class*='fontBodyMedium']"
       ];
       
       const ratingSelectors = [
         ".kvMYJc",         // Primary rating selector
         ".Fam1ne",         // Alternative
         "[aria-label*='star']",
-        "[aria-label*='Star']"
+        "[aria-label*='Star']",
+        "span[aria-label*='star']",
+        "div[aria-label*='star']"
       ];
       
       const textSelectors = [
         ".wiI7pd",         // Primary review text selector
         ".MyEned",          // Alternative
         "span.wiI7pd",      // More specific
-        "div.wiI7pd"        // Container variant
+        "div.wiI7pd",       // Container variant
+        "[class*='wiI7pd']", // Partial class match
+        "span[class*='fontBodyMedium']", // Alternative text style
+        "div[class*='fontBodyMedium']"
       ];
       
       const dateSelectors = [
         ".rsqaWe",          // Primary date selector
         ".p4vbYd",          // Alternative
         ".fnsRMc",          // Another variant
-        "span.rsqaWe"       // More specific
+        "span.rsqaWe",      // More specific
+        "[class*='rsqaWe']", // Partial class match
+        "span[class*='fontBodySmall']", // Alternative date style
+        "div[class*='fontBodySmall']"
       ];
 
       const findText = (selectors, context = el) => {
         for (const sel of selectors) {
-          const elem = context.querySelector(sel);
-          if (elem) {
-            const text = elem.innerText?.trim() || elem.textContent?.trim() || "";
-            if (text && !isBusinessInfo(text)) return text;
+          try {
+            const elem = context.querySelector(sel);
+            if (elem) {
+              const text = elem.innerText?.trim() || elem.textContent?.trim() || "";
+              if (text && !isBusinessInfo(text)) return text;
+            }
+          } catch (e) {
+            // Invalid selector, continue
           }
         }
         return "";
@@ -241,39 +271,99 @@ async function extractReviews(page) {
       const findRating = () => {
         // First try structured selectors for user review ratings
         for (const sel of ratingSelectors) {
-          const elem = el.querySelector(sel);
-          if (elem) {
-            const ariaLabel = elem.getAttribute("aria-label") || "";
-            // Look for patterns like "Rated 5 out of 5 stars" or "5 stars"
-            const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
-            if (match) {
-              const rating = Number(match[1]);
-              if (rating >= 1 && rating <= 5) return rating;
+          try {
+            const elem = el.querySelector(sel);
+            if (elem) {
+              const ariaLabel = elem.getAttribute("aria-label") || "";
+              // Look for patterns like "Rated 5 out of 5 stars" or "5 stars"
+              const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
+              if (match) {
+                const rating = Number(match[1]);
+                if (rating >= 1 && rating <= 5) return rating;
+              }
             }
+          } catch (e) {
+            // Invalid selector, continue
           }
         }
         
         // Look for aria-label with rating anywhere in the element tree
-        const allElements = el.querySelectorAll('[aria-label]');
-        for (const elem of allElements) {
-          const ariaLabel = elem.getAttribute("aria-label") || "";
-          if (ariaLabel.includes("star") || ariaLabel.includes("Star")) {
-            const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
-            if (match) {
-              const rating = Number(match[1]);
-              if (rating >= 1 && rating <= 5) return rating;
+        try {
+          const allElements = el.querySelectorAll('[aria-label]');
+          for (const elem of allElements) {
+            const ariaLabel = elem.getAttribute("aria-label") || "";
+            if (ariaLabel.includes("star") || ariaLabel.includes("Star")) {
+              const match = ariaLabel.match(/(\d+)\s*(out of|star)/i);
+              if (match) {
+                const rating = Number(match[1]);
+                if (rating >= 1 && rating <= 5) return rating;
+              }
             }
           }
+        } catch (e) {
+          // Continue
         }
         
         return null;
       };
 
       // Extract fields with validation
-      const author = findText(authorSelectors);
-      const rating = findRating();
-      const text = findText(textSelectors);
-      const date = findText(dateSelectors);
+      let author = findText(authorSelectors);
+      let rating = findRating();
+      let text = findText(textSelectors);
+      let date = findText(dateSelectors);
+
+      // If we didn't find author with specific selectors, try a more general approach
+      if (!author) {
+        // Look for text that looks like a name (has letters, reasonable length)
+        const allTextNodes = Array.from(el.querySelectorAll('span, div')).map(e => ({
+          text: (e.innerText || e.textContent || '').trim(),
+          elem: e
+        })).filter(e => e.text && e.text.length > 2 && e.text.length < 50);
+        
+        for (const node of allTextNodes) {
+          // Check if it looks like a name (not a rating, not business info)
+          if (!isBusinessInfo(node.text) && 
+              !/^\d+\.\d+\(\d+\)$/.test(node.text) &&
+              /[a-zA-Z]/.test(node.text) &&
+              !node.text.includes('star') &&
+              !node.text.match(/^\d+\s*(out of|star)/i)) {
+            // Check if this element is positioned early in the container (likely author)
+            const rect = node.elem.getBoundingClientRect();
+            const containerRect = el.getBoundingClientRect();
+            if (rect.top < containerRect.top + containerRect.height * 0.3) {
+              author = node.text;
+              break;
+            }
+          }
+        }
+      }
+
+      // If we didn't find text with specific selectors, try a more general approach
+      if (!text || text.length < 10) {
+        // Look for longer text blocks that might be review content
+        const allTextNodes = Array.from(el.querySelectorAll('span, div')).map(e => ({
+          text: (e.innerText || e.textContent || '').trim(),
+          elem: e
+        })).filter(e => e.text && e.text.length > 20);
+        
+        for (const node of allTextNodes) {
+          // Check if it looks like review text (not business info, not a name)
+          if (!isBusinessInfo(node.text) && 
+              !/^\d+\.\d+\(\d+\)$/.test(node.text) &&
+              !node.text.match(/^\d+\s*(out of|star)/i) &&
+              node.text.length > 20 &&
+              !node.text.includes('star')) {
+            // Check if this element is positioned in the middle/bottom of container (likely review text)
+            const rect = node.elem.getBoundingClientRect();
+            const containerRect = el.getBoundingClientRect();
+            if (rect.top > containerRect.top + containerRect.height * 0.2) {
+              text = node.text;
+              break;
+            }
+          }
+        }
+      }
 
       // Validate this is actually a review, not business info
       if (!isRealAuthor(author) && !text) {
@@ -314,13 +404,17 @@ async function extractReviews(page) {
       const hasReviewText = review.text && review.text.length > 10 && !isBusinessInfo(review.text);
       const hasRating = review.rating !== null;
       
-      const isValid = (hasRealAuthor || hasReviewText) && (hasRating || hasReviewText);
+      // More lenient validation: accept if we have author OR text OR rating
+      const isValid = hasRealAuthor || hasReviewText || hasRating;
       
       if (!isValid) {
         console.log(`Filtered out invalid review:`, review);
       }
       return isValid;
     });
+
+    console.log(`Extracted ${extractedReviews.length} valid reviews out of ${actualReviewElements.length} containers`);
+    return extractedReviews;
   });
 }
 
@@ -860,6 +954,32 @@ app.get("/scrape", async (req, res) => {
 
     // Scroll to load more reviews
     await scrollToLoadReviews(page, 10);
+
+    // Debug: Check what review elements are actually present before extraction
+    const debugInfo = await page.evaluate(() => {
+      const containers = document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']");
+      const sampleContainer = containers[0];
+      
+      if (!sampleContainer) {
+        return { error: "No review containers found" };
+      }
+
+      return {
+        containerCount: containers.length,
+        sampleContainer: {
+          className: sampleContainer.className,
+          innerHTML: sampleContainer.innerHTML.substring(0, 1000),
+          hasAuthor: !!sampleContainer.querySelector('.d4r55, .X43Kjb, [class*="d4r55"]'),
+          hasRating: !!sampleContainer.querySelector('[aria-label*="star"], [aria-label*="Star"]'),
+          hasText: !!sampleContainer.querySelector('.wiI7pd, .MyEned, [class*="wiI7pd"]'),
+          hasDate: !!sampleContainer.querySelector('.rsqaWe, .p4vbYd, [class*="rsqaWe"]'),
+          allClasses: Array.from(sampleContainer.querySelectorAll('[class]')).slice(0, 10).map(e => e.className),
+          allAriaLabels: Array.from(sampleContainer.querySelectorAll('[aria-label]')).slice(0, 10).map(e => e.getAttribute('aria-label'))
+        }
+      };
+    });
+    
+    console.log("Pre-extraction debug info:", JSON.stringify(debugInfo, null, 2));
 
     // Extract reviews
     console.log("Starting review extraction...");
