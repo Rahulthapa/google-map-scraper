@@ -190,32 +190,89 @@ async function extractReviews(page) {
     }
 
     // If primary selectors don't work, try finding reviews by structure
+    // This is the key fallback - start from the elements we know exist (.wiI7pd, .d4r55)
     if (reviewElements.length === 0) {
-      // Start from review text nodes
+      console.log("Primary container selectors failed, trying structure-based approach...");
+      // Start from review text nodes and author nodes (these are what found the 47 reviews)
       const textNodes = collectCandidates(".wiI7pd, .MyEned, [class*='wiI7pd']");
       const authorNodes = collectCandidates(".d4r55, .X43Kjb, [class*='d4r55']");
       const ratingNodes = collectCandidates("[aria-label*='star'], [aria-label*='Star']");
       const potentialReviews = [];
 
+      console.log(`Found ${textNodes.length} text nodes, ${authorNodes.length} author nodes, ${ratingNodes.length} rating nodes`);
+
       const collectClosestContainer = (node) => {
         if (!node) return null;
-        const candidates = [
-          node.closest("[data-review-id]"),
-          node.closest("[jscontroller]"),
-          node.closest("[role='article']"),
-          node.closest(".jftiEf"),
-        ];
-        return candidates.find(Boolean) || node.parentElement;
+        // Walk up the DOM tree to find a container
+        let current = node;
+        for (let i = 0; i < 10; i++) {
+          if (!current) break;
+          
+          // Check if current element looks like a container
+          const hasMultipleChildren = current.children && current.children.length >= 2;
+          const hasReviewContent = current.querySelector && (
+            current.querySelector(".wiI7pd, .MyEned") ||
+            current.querySelector(".d4r55, .X43Kjb") ||
+            current.querySelector("[aria-label*='star']")
+          );
+          
+          if (hasMultipleChildren && hasReviewContent) {
+            return current;
+          }
+          
+          // Also check for known container patterns
+          const candidates = [
+            current.closest && current.closest("[data-review-id]"),
+            current.closest && current.closest("[jscontroller]"),
+            current.closest && current.closest("[role='article']"),
+            current.closest && current.closest(".jftiEf"),
+          ].filter(Boolean);
+          
+          if (candidates.length > 0) {
+            return candidates[0];
+          }
+          
+          current = current.parentElement;
+        }
+        return node.parentElement || node;
       };
 
-      [...textNodes, ...authorNodes, ...ratingNodes].forEach(node => {
+      // Process each node and find its container
+      const allNodes = [...textNodes, ...authorNodes, ...ratingNodes];
+      allNodes.forEach(node => {
         const container = collectClosestContainer(node);
-        if (container && hasReviewSignals(container)) {
-          potentialReviews.push(container);
+        if (container) {
+          // Verify this container has review signals
+          const hasText = container.querySelector && (
+            container.querySelector(".wiI7pd, .MyEned, [class*='wiI7pd']") ||
+            container.textContent && container.textContent.length > 20
+          );
+          const hasAuthor = container.querySelector && (
+            container.querySelector(".d4r55, .X43Kjb, [class*='d4r55']") ||
+            false
+          );
+          const hasRating = container.querySelector && container.querySelector("[aria-label*='star'], [aria-label*='Star']");
+          
+          if (hasText || hasAuthor || hasRating) {
+            potentialReviews.push(container);
+          }
         }
       });
 
-      reviewElements = Array.from(new Set(potentialReviews.map(findReviewContainer).filter(Boolean)));
+      // Deduplicate by checking if containers are the same or one contains another
+      const uniqueContainers = [];
+      potentialReviews.forEach(container => {
+        const isDuplicate = uniqueContainers.some(existing => 
+          existing === container || 
+          existing.contains(container) || 
+          container.contains(existing)
+        );
+        if (!isDuplicate) {
+          uniqueContainers.push(container);
+        }
+      });
+
+      reviewElements = uniqueContainers;
       if (reviewElements.length > 0) {
         usedSelector = "structure-based";
         console.log(`Using structure-based detection, found ${reviewElements.length} potential reviews`);
@@ -251,8 +308,21 @@ async function extractReviews(page) {
       if (!author) return false;
       // Business ratings look like "4.1(470)" - not a name
       if (/^\d+\.\d+\(\d+\)$/.test(author.trim())) return false;
+      // Filter out UI elements
+      const lower = author.toLowerCase();
+      if (lower.includes('add destination') || 
+          lower.includes('your location') ||
+          lower.includes('saved') ||
+          lower.includes('recents') ||
+          lower.includes('get app') ||
+          lower.includes('directions') ||
+          lower.includes('call') ||
+          lower.includes('website') ||
+          lower.includes('share')) {
+        return false;
+      }
       // Real names usually have letters and might have spaces
-      return /[a-zA-Z]/.test(author) && author.length > 2;
+      return /[a-zA-Z]/.test(author) && author.length > 2 && author.length < 100;
     };
 
     // Debug: Log first container structure
@@ -380,12 +450,13 @@ async function extractReviews(page) {
         })).filter(e => e.text && e.text.length > 2 && e.text.length < 50);
         
         for (const node of allTextNodes) {
-          // Check if it looks like a name (not a rating, not business info)
+          // Check if it looks like a name (not a rating, not business info, not UI element)
           if (!isBusinessInfo(node.text) && 
               !/^\d+\.\d+\(\d+\)$/.test(node.text) &&
               /[a-zA-Z]/.test(node.text) &&
               !node.text.includes('star') &&
-              !node.text.match(/^\d+\s*(out of|star)/i)) {
+              !node.text.match(/^\d+\s*(out of|star)/i) &&
+              isRealAuthor(node.text)) { // Use the improved isRealAuthor function
             // Check if this element is positioned early in the container (likely author)
             const rect = node.elem.getBoundingClientRect();
             const containerRect = el.getBoundingClientRect();
@@ -461,8 +532,12 @@ async function extractReviews(page) {
       const hasReviewText = review.text && review.text.length > 10 && !isBusinessInfo(review.text);
       const hasRating = review.rating !== null;
       
-      // More lenient validation: accept if we have author OR text OR rating
-      const isValid = hasRealAuthor || hasReviewText || hasRating;
+      // Filter out UI elements and invalid reviews
+      // Must have either a real author OR meaningful review text
+      // Rating alone is not enough (could be business rating)
+      const isValid = (hasRealAuthor || hasReviewText) && 
+                      !isBusinessInfo(review.text) && 
+                      !isBusinessInfo(review.author);
       
       if (!isValid) {
         console.log(`Filtered out invalid review:`, review);
