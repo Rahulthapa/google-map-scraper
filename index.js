@@ -122,6 +122,10 @@ async function extractReviews(page) {
       "div[jscontroller*='eIu7Db']",            // Alternate jscontroller
       "[aria-label*='review'][role='article']", // Screen reader friendly containers
       "div[role='article']",                    // Generic article containers
+      ".wiI7pd",                                // Review text span
+      ".MyEned",                                // Expanded text container
+      ".d4r55",                                 // Author name
+      ".X43Kjb"                                 // Alternate author name
     ];
 
     const collectCandidates = (selector) => {
@@ -132,8 +136,32 @@ async function extractReviews(page) {
       }
     };
 
+    const containerSelectors = [
+      "[data-review-id]",
+      "[jscontroller*='xd0Rqe']",
+      "[jscontroller*='eIu7Db']",
+      "[role='article']",
+      ".jftiEf"
+    ];
+
+    const findReviewContainer = (el) => {
+      if (!el) return null;
+      if (typeof el.closest === "function") {
+        for (const selector of containerSelectors) {
+          try {
+            const match = el.closest(selector);
+            if (match) return match;
+          } catch (e) {
+            continue;
+          }
+        }
+      }
+      return el.parentElement || el;
+    };
+
     const hasReviewSignals = (el) => {
       if (!el) return false;
+      const target = findReviewContainer(el) || el;
       return !!(
         el.querySelector(".wiI7pd, .MyEned, [class*='wiI7pd']") ||
         el.querySelector(".d4r55, .X43Kjb, [class*='d4r55']") ||
@@ -144,10 +172,17 @@ async function extractReviews(page) {
     let reviewElements = [];
     let usedSelector = null;
 
+    const selectorCounts = {};
+
     for (const selector of reviewSelectors) {
-      const candidates = collectCandidates(selector).filter(hasReviewSignals);
+      const rawCandidates = collectCandidates(selector);
+      selectorCounts[selector] = rawCandidates.length;
+      const candidates = rawCandidates
+        .map(findReviewContainer)
+        .filter(Boolean)
+        .filter(hasReviewSignals);
       if (candidates.length > 0) {
-        reviewElements = candidates;
+        reviewElements = Array.from(new Set(candidates));
         usedSelector = selector;
         console.log(`Using selector: ${selector}, found ${reviewElements.length} elements`);
         break;
@@ -180,7 +215,7 @@ async function extractReviews(page) {
         }
       });
 
-      reviewElements = Array.from(new Set(potentialReviews));
+      reviewElements = Array.from(new Set(potentialReviews.map(findReviewContainer).filter(Boolean)));
       if (reviewElements.length > 0) {
         usedSelector = "structure-based";
         console.log(`Using structure-based detection, found ${reviewElements.length} potential reviews`);
@@ -193,7 +228,7 @@ async function extractReviews(page) {
     }
 
     const actualReviewElements = Array.from(reviewElements);
-    console.log(`Extracting from ${actualReviewElements.length} review containers`);
+    console.log(`Extracting from ${actualReviewElements.length} review containers (selector counts: ${JSON.stringify(selectorCounts)})`);
 
     // Helper function to check if text looks like business info (not a review)
     const isBusinessInfo = (text) => {
@@ -988,7 +1023,11 @@ app.get("/scrape", async (req, res) => {
         "div[jscontroller*='xd0Rqe']",
         "div[jscontroller*='eIu7Db']",
         "[aria-label*='review'][role='article']",
-        "div[role='article']"
+        "div[role='article']",
+        ".wiI7pd",
+        ".MyEned",
+        ".d4r55",
+        ".X43Kjb"
       ];
       const containers = document.querySelectorAll(containerSelectors.join(","));
       const sampleContainer = containers[0];
