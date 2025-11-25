@@ -582,7 +582,9 @@ app.get("/scrape", async (req, res) => {
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding"
-      ]
+      ],
+      timeout: 120000,        // Give Chrome more time to boot on cold starts
+      protocolTimeout: 120000 // Allow longer for devtools handshake
     };
 
     // Use the Chrome path if we found/installed it
