@@ -115,17 +115,39 @@ async function extractReviews(page) {
     // Try multiple selector patterns (Google changes these frequently)
     // Focus on actual review containers, not business listings
     const reviewSelectors = [
-      ".jftiEf",           // Primary selector for review containers
-      "[data-review-id]",  // Alternative
+      ".jftiEf",                                // Legacy review container
+      "[data-review-id]",                       // Data attribute used historically
       "[jsaction*='review'][jsaction*='pane']", // Review pane containers
+      "div[jscontroller*='xd0Rqe']",            // New jscontroller containers
+      "div[jscontroller*='eIu7Db']",            // Alternate jscontroller
+      "[aria-label*='review'][role='article']", // Screen reader friendly containers
+      "div[role='article']",                    // Generic article containers
     ];
+
+    const collectCandidates = (selector) => {
+      try {
+        return Array.from(document.querySelectorAll(selector));
+      } catch {
+        return [];
+      }
+    };
+
+    const hasReviewSignals = (el) => {
+      if (!el) return false;
+      return !!(
+        el.querySelector(".wiI7pd, .MyEned, [class*='wiI7pd']") ||
+        el.querySelector(".d4r55, .X43Kjb, [class*='d4r55']") ||
+        el.querySelector("[aria-label*='star'], [aria-label*='Star']")
+      );
+    };
 
     let reviewElements = [];
     let usedSelector = null;
-    
+
     for (const selector of reviewSelectors) {
-      reviewElements = document.querySelectorAll(selector);
-      if (reviewElements.length > 0) {
+      const candidates = collectCandidates(selector).filter(hasReviewSignals);
+      if (candidates.length > 0) {
+        reviewElements = candidates;
         usedSelector = selector;
         console.log(`Using selector: ${selector}, found ${reviewElements.length} elements`);
         break;
@@ -134,29 +156,30 @@ async function extractReviews(page) {
 
     // If primary selectors don't work, try finding reviews by structure
     if (reviewElements.length === 0) {
-      // Look for elements that contain both a rating (star) and review text
-      const allElements = document.querySelectorAll('[aria-label*="star"], [aria-label*="Star"]');
+      // Start from review text nodes
+      const textNodes = collectCandidates(".wiI7pd, .MyEned, [class*='wiI7pd']");
+      const authorNodes = collectCandidates(".d4r55, .X43Kjb, [class*='d4r55']");
+      const ratingNodes = collectCandidates("[aria-label*='star'], [aria-label*='Star']");
       const potentialReviews = [];
-      
-      allElements.forEach(el => {
-        // Walk up to find the review container
-        let container = el;
-        for (let i = 0; i < 5; i++) {
-          container = container.parentElement;
-          if (!container) break;
-          
-          // Check if this looks like a review container
-          const hasReviewText = container.querySelector('.wiI7pd, .MyEned, [class*="review"]');
-          const hasAuthor = container.querySelector('.d4r55, .X43Kjb, [class*="author"]');
-          
-          if (hasReviewText || hasAuthor) {
-            potentialReviews.push(container);
-            break;
-          }
+
+      const collectClosestContainer = (node) => {
+        if (!node) return null;
+        const candidates = [
+          node.closest("[data-review-id]"),
+          node.closest("[jscontroller]"),
+          node.closest("[role='article']"),
+          node.closest(".jftiEf"),
+        ];
+        return candidates.find(Boolean) || node.parentElement;
+      };
+
+      [...textNodes, ...authorNodes, ...ratingNodes].forEach(node => {
+        const container = collectClosestContainer(node);
+        if (container && hasReviewSignals(container)) {
+          potentialReviews.push(container);
         }
       });
-      
-      // Remove duplicates
+
       reviewElements = Array.from(new Set(potentialReviews));
       if (reviewElements.length > 0) {
         usedSelector = "structure-based";
@@ -174,7 +197,7 @@ async function extractReviews(page) {
 
     // Helper function to check if text looks like business info (not a review)
     const isBusinessInfo = (text) => {
-      if (!text) return true;
+      if (!text) return false;
       const lower = text.toLowerCase();
       // Patterns that indicate business information, not reviews
       return /^\d+\.\d+\(\d+\)$/.test(text.trim()) || // "4.1(470)"
@@ -957,11 +980,26 @@ app.get("/scrape", async (req, res) => {
 
     // Debug: Check what review elements are actually present before extraction
     const debugInfo = await page.evaluate(() => {
-      const containers = document.querySelectorAll(".jftiEf, [data-review-id], [jsaction*='review'][jsaction*='pane']");
+      const containerSelectors = [
+        ".jftiEf",
+        "[data-review-id]",
+        "[jsaction*='review'][jsaction*='pane']",
+        "div[jscontroller*='xd0Rqe']",
+        "div[jscontroller*='eIu7Db']",
+        "[aria-label*='review'][role='article']",
+        "div[role='article']"
+      ];
+      const containers = document.querySelectorAll(containerSelectors.join(","));
       const sampleContainer = containers[0];
       
       if (!sampleContainer) {
-        return { error: "No review containers found" };
+        const fallbackText = document.querySelector(".wiI7pd, .MyEned, [class*='wiI7pd']");
+        return { 
+          error: "No review containers found",
+          fallbackText: fallbackText?.innerText?.substring(0, 200) || null,
+          availableSelectors: containerSelectors,
+          domSummary: document.body.innerText.substring(0, 200)
+        };
       }
 
       return {
